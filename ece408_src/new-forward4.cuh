@@ -3,14 +3,15 @@
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
 #include <mxnet/base.h>
+using namespace std;
 namespace mxnet
 {
 namespace op
 {
 
 #define KERNEL_WIDTH   5
-#define TILE_WIDTH     20
-#define CACHE_WIDTH    (KERNEL_WIDTH + TILE_WIDTH - 1) 
+#define TILE_WIDTH     KERNEL_WIDTH
+#define CACHE_WIDTH    (KERNEL_WIDTH + TILE_WIDTH - 1) //20x20
 __constant__ float deviceKernel[KERNEL_WIDTH * KERNEL_WIDTH * KERNEL_WIDTH];
 
 
@@ -47,46 +48,48 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     // int h_i = h_o + r;
     
     __shared__ float Nds1[CACHE_WIDTH][CACHE_WIDTH]; //one channel
-    __shared__ float Nds6 [6][CACHE_WIDTH][CACHE_WIDTH]; //one channel 
-
+//    __shared__ float Nds6 [6][CACHE_WIDTH][CACHE_WIDTH]; //one channel   
+        // for(int c = 0; c < C; c++){
+        //     //load tile to shared memory
+        //     if(0<=h_o && h_o < H && 0<=w_o && w_o < W){
+        //         Nds6[c][ty][tx] = x4d(b,c,h_o,w_o);
+        //     }
+        //     else{
+        //         Nds6[c][ty][tx] = 0;
+        //     }
+        // }
     float acc = 0.0;
-    if (C == 6){  
         for(int c = 0; c < C; c++){
-            //load tile to shared memory
             if(0<=h_o && h_o < H && 0<=w_o && w_o < W){
-                Nds6[c][ty][tx] = x4d(b,c,h_o,w_o);
+                Nds1[ty][tx] = x4d(b,c,h_o,w_o);
             }
             else{
-                Nds6[c][ty][tx] = 0;
+                Nds1[ty][tx] = 0;
             }
-        }
-        __syncthreads();
-        for(int c = 0; c < C; c++){
+            __syncthreads();
             for(int p = 0; p < K; p++){
                 for(int q=0; q < K; q++){
                     if(ty<TILE_WIDTH && tx<TILE_WIDTH)
-                        acc += Nds6[c][ty+p][tx+q] * k4d(m,c,p,q);
+                        acc += Nds1[ty+p][tx+q] * k4d(m,c,p,q);
                 }
             }
         }
-    }
-    else{
-        //load tile to shared memory
-        if(0<=h_o && h_o < H && 0<=w_o && w_o < W){
-            Nds1[ty][tx] = x4d(b,0,h_o,w_o);
-        }
-        else{
-            Nds1[ty][tx] = 0;
-        }
-        __syncthreads();
-        for(int p = 0; p < K; p++){
-            for(int q=0; q < K; q++){
-                if(ty<TILE_WIDTH && tx<TILE_WIDTH)
-                    acc += Nds1[ty+p][tx+q] * k4d(m,0,p,q);
-            }
-        }
-    }
+    // else{
+    //     //load tile to shared memory
+    //     if(0<=h_o && h_o < H && 0<=w_o && w_o < W){
+    //         Nds1[ty][tx] = x4d(b,c,h_o,w_o);
+    //     }
+    //     else{
+    //         Nds1[ty][tx] = 0;
+    //     }
 
+    //     for(int p = 0; p < K; p++){
+    //         for(int q=0; q < K; q++){
+    //             if(ty<TILE_WIDTH && tx<TILE_WIDTH)
+    //                 acc += Nds1[ty+p][tx+q] * k4d(m,c,p,q);
+    //         }
+    //     }
+    // }
     if(h_o<H_out && w_o<W_out)
         y4d(b,m,h_o,w_o) = acc;
 

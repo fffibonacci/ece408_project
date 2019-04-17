@@ -27,11 +27,14 @@ print "done"
 # Reduce the size of the dataset, if desired
 dataset_size = max(0, min(dataset_size, 10000))
 test_images = test_images[:dataset_size]
+#('shape test_images', (10000, 1, 48, 48))
+# one channel 48*48
+
 test_labels = test_labels[:dataset_size]
 
 # Cap batch size at the size of our training data
 batch_size = len(test_images)
-
+#('batch_size', 10000)
 # Get iterators that cover the dataset
 test_iter = mx.io.NDArrayIter(
     test_images, test_labels, batch_size)

@@ -7,15 +7,12 @@ namespace mxnet
 {
 namespace op
 {
-
-#define KERNEL_WIDTH   5
-#define TILE_WIDTH     20
-#define CACHE_WIDTH    (KERNEL_WIDTH + TILE_WIDTH - 1) 
-__constant__ float deviceKernel[KERNEL_WIDTH * KERNEL_WIDTH * KERNEL_WIDTH];
+#define TILE_WIDTH 16
 
 
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
+
     /*
     Modify this function to implement the forward pass described in Chapter 16.
     We have added an additional dimension to the tensors to support an entire mini-batch
@@ -26,69 +23,31 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
     const int W_grid = ceil(1.0*W_out/TILE_WIDTH);
+   // const int H_grid = H_out/TILE_WIDTH;
+   // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
+   // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
+
 // An example use of these macros:
 // float a = y4d(0,0,0,0)
 // y4d(0,0,0,0) = a
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
 #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
- 
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.z % W_grid;
-    int by = blockIdx.z / W_grid;
-
     int b = blockIdx.x;
     int m = blockIdx.y;
-    int h_o = by * TILE_WIDTH + ty; //very important!!  blockIdx.z
-    int w_o = bx * TILE_WIDTH + tx;
-    int r = KERNEL_WIDTH / 2;
-    // int w_i = w_o + r ;
-    // int h_i = h_o + r;
-    
-    __shared__ float Nds1[CACHE_WIDTH][CACHE_WIDTH]; //one channel
-    __shared__ float Nds6 [6][CACHE_WIDTH][CACHE_WIDTH]; //one channel 
-
+    int h = blockIdx.z / W_grid * TILE_WIDTH + threadIdx.y; //very important!!  blockIdx.z
+    int w = blockIdx.z % W_grid * TILE_WIDTH + threadIdx.x;
     float acc = 0.0;
-    if (C == 6){  
-        for(int c = 0; c < C; c++){
-            //load tile to shared memory
-            if(0<=h_o && h_o < H && 0<=w_o && w_o < W){
-                Nds6[c][ty][tx] = x4d(b,c,h_o,w_o);
-            }
-            else{
-                Nds6[c][ty][tx] = 0;
-            }
-        }
-        __syncthreads();
-        for(int c = 0; c < C; c++){
-            for(int p = 0; p < K; p++){
-                for(int q=0; q < K; q++){
-                    if(ty<TILE_WIDTH && tx<TILE_WIDTH)
-                        acc += Nds6[c][ty+p][tx+q] * k4d(m,c,p,q);
-                }
-            }
-        }
-    }
-    else{
-        //load tile to shared memory
-        if(0<=h_o && h_o < H && 0<=w_o && w_o < W){
-            Nds1[ty][tx] = x4d(b,0,h_o,w_o);
-        }
-        else{
-            Nds1[ty][tx] = 0;
-        }
-        __syncthreads();
+    for(int c = 0; c < C; c++){
         for(int p = 0; p < K; p++){
             for(int q=0; q < K; q++){
-                if(ty<TILE_WIDTH && tx<TILE_WIDTH)
-                    acc += Nds1[ty+p][tx+q] * k4d(m,0,p,q);
+                if(h+p < H && w+q < W)
+                    acc += x4d(b,c,h+p,w+q) * k4d(m,c,p,q);
             }
         }
     }
-
-    if(h_o<H_out && w_o<W_out)
-        y4d(b,m,h_o,w_o) = acc;
+    if(h<H_out && w<W_out)
+        y4d(b,m,h,w) = acc;
 
 #undef y4d
 #undef x4d
@@ -127,8 +86,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     //10000,16,6,22,22,5
     // Set the kernel dimensions
     dim3 gridDim(B, M, Z);
-
-    dim3 blockDim(CACHE_WIDTH, CACHE_WIDTH, 1);
+    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
 
     // Call the kernel
     forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
