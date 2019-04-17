@@ -3,19 +3,20 @@
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
 #include <mxnet/base.h>
+#include <iostream>
 namespace mxnet
 {
 namespace op
 {
+#define TILE_WIDTH 16
 
-#define KERNEL_WIDTH   5
-#define TILE_WIDTH     20
-#define CACHE_WIDTH    (KERNEL_WIDTH + TILE_WIDTH - 1) 
-__constant__ float deviceKernel[KERNEL_WIDTH * KERNEL_WIDTH * KERNEL_WIDTH];
+__constant__ float kernel1[150];
+__constant__ float kernel2[2400];
 
 
-__global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+__global__ void forward_kernel_origin(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
+
     /*
     Modify this function to implement the forward pass described in Chapter 16.
     We have added an additional dimension to the tensors to support an entire mini-batch
@@ -26,74 +27,129 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
     const int W_grid = ceil(1.0*W_out/TILE_WIDTH);
+   // const int H_grid = H_out/TILE_WIDTH;
+   // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
+   // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
+
 // An example use of these macros:
 // float a = y4d(0,0,0,0)
 // y4d(0,0,0,0) = a
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
 #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
- 
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.z % W_grid;
-    int by = blockIdx.z / W_grid;
-
     int b = blockIdx.x;
     int m = blockIdx.y;
-    int h_o = by * TILE_WIDTH + ty; //very important!!  blockIdx.z
-    int w_o = bx * TILE_WIDTH + tx;
-    int r = KERNEL_WIDTH / 2;
-    // int w_i = w_o + r ;
-    // int h_i = h_o + r;
-    
-    __shared__ float Nds1[CACHE_WIDTH][CACHE_WIDTH]; //one channel
-    __shared__ float Nds6 [6][CACHE_WIDTH][CACHE_WIDTH]; //one channel 
-
-    float acc = 0.0;
-    if (C == 6){  
-        for(int c = 0; c < C; c++){
-            //load tile to shared memory
-            if(0<=h_o && h_o < H && 0<=w_o && w_o < W){
-                Nds6[c][ty][tx] = x4d(b,c,h_o,w_o);
-            }
-            else{
-                Nds6[c][ty][tx] = 0;
-            }
-        }
-        __syncthreads();
-        for(int c = 0; c < C; c++){
-            for(int p = 0; p < K; p++){
-                for(int q=0; q < K; q++){
-                    if(ty<TILE_WIDTH && tx<TILE_WIDTH)
-                        acc += Nds6[c][ty+p][tx+q] * k4d(m,c,p,q);
-                }
-            }
-        }
-    }
-    else{
-        //load tile to shared memory
-        if(0<=h_o && h_o < H && 0<=w_o && w_o < W){
-            Nds1[ty][tx] = x4d(b,0,h_o,w_o);
-        }
-        else{
-            Nds1[ty][tx] = 0;
-        }
-        __syncthreads();
+    int h = (blockIdx.z / W_grid) * TILE_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
+                                                              // so we need to multiply by TILE_WIDTH
+    int w = (blockIdx.z % W_grid) * TILE_WIDTH + threadIdx.x;
+    float acc = 0.;
+    for(int c = 0; c < C; c++){
         for(int p = 0; p < K; p++){
             for(int q=0; q < K; q++){
-                if(ty<TILE_WIDTH && tx<TILE_WIDTH)
-                    acc += Nds1[ty+p][tx+q] * k4d(m,0,p,q);
+                if(h+p < H && w+q < W)
+                    acc += x4d(b,c,h+p,w+q) * k4d(m,c,p,q);
             }
         }
     }
-
-    if(h_o<H_out && w_o<W_out)
-        y4d(b,m,h_o,w_o) = acc;
+    if(h<H_out && w<W_out)
+        y4d(b,m,h,w) = acc;
 
 #undef y4d
 #undef x4d
 #undef k4d
 }
+
+__global__ void forward_kernel_cons_kernel_1(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+{
+
+    /*
+    Modify this function to implement the forward pass described in Chapter 16.
+    We have added an additional dimension to the tensors to support an entire mini-batch
+    The goal here is to be correct AND fast.
+    We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
+    */
+
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+    const int W_grid = ceil(1.0*W_out/TILE_WIDTH);
+   // const int H_grid = H_out/TILE_WIDTH;
+   // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
+   // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
+
+// An example use of these macros:
+// float a = y4d(0,0,0,0)
+// y4d(0,0,0,0) = a
+#define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+#define k4d(i3, i2, i1, i0) kernel1[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+    int b = blockIdx.x;
+    int m = blockIdx.y;
+    int h = (blockIdx.z / W_grid) * TILE_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
+                                                              // so we need to multiply by TILE_WIDTH
+    int w = (blockIdx.z % W_grid) * TILE_WIDTH + threadIdx.x;
+    float acc = 0.;
+    for(int c = 0; c < C; c++){
+        for(int p = 0; p < K; p++){
+            for(int q=0; q < K; q++){
+                if(h+p < H && w+q < W)
+                    acc += x4d(b,c,h+p,w+q) * k4d(m,c,p,q);
+            }
+        }
+    }
+    if(h<H_out && w<W_out)
+        y4d(b,m,h,w) = acc;
+
+#undef y4d
+#undef x4d
+#undef k4d
+}
+
+__global__ void forward_kernel_cons_kernel_2(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+{
+
+    /*
+    Modify this function to implement the forward pass described in Chapter 16.
+    We have added an additional dimension to the tensors to support an entire mini-batch
+    The goal here is to be correct AND fast.
+    We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
+    */
+
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+    const int W_grid = ceil(1.0*W_out/TILE_WIDTH);
+   // const int H_grid = H_out/TILE_WIDTH;
+   // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
+   // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
+
+// An example use of these macros:
+// float a = y4d(0,0,0,0)
+// y4d(0,0,0,0) = a
+#define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+#define k4d(i3, i2, i1, i0) kernel2[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+    int b = blockIdx.x;
+    int m = blockIdx.y;
+    int h = (blockIdx.z / W_grid) * TILE_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
+                                                              // so we need to multiply by TILE_WIDTH
+    int w = (blockIdx.z % W_grid) * TILE_WIDTH + threadIdx.x;
+    float acc = 0.;
+    for(int c = 0; c < C; c++){
+        for(int p = 0; p < K; p++){
+            for(int q=0; q < K; q++){
+                if(h+p < H && w+q < W)
+                    acc += x4d(b,c,h+p,w+q) * k4d(m,c,p,q);
+            }
+        }
+    }
+    if(h<H_out && w<W_out)
+        y4d(b,m,h,w) = acc;
+
+#undef y4d
+#undef x4d
+#undef k4d
+}
+
+
 
 /* 
    This function is called by new-inl.h
@@ -110,28 +166,44 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
     // Extract the tensor dimensions into B,M,C,H,W,K
     // ...
-    const int B = x.shape_[0];
-    const int M = y.shape_[1];//featuremap
-    const int C = x.shape_[1];
-    const int H = x.shape_[2];
-    const int W = x.shape_[3];
-    const int K = w.shape_[3];
+    const int B = x.shape_[0]; // batch size
+    const int M = y.shape_[1]; // # of output feature maps
+    const int C = x.shape_[1]; // # of input channels
+    const int H = x.shape_[2]; // input image width
+    const int W = x.shape_[3]; // input image height
+    const int K = w.shape_[3]; // kernel size
+    //std::cout << C << std::endl;
+    //std::cout << K << std::endl;
+    //std::cout << W << std::endl;
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    const int W_grid = ceil(1.0*W_out/TILE_WIDTH);
-    const int H_grid = ceil(1.0*H_out/TILE_WIDTH);
+    const int W_grid = ceil(W_out*1.0/TILE_WIDTH);
+    const int H_grid = ceil(H_out*1.0/TILE_WIDTH);
     const int Z = H_grid * W_grid;
-    //cout<<B<<" "<<M<<" "<<C<<" "<<H<<W<<" "<<K<<endl; 
-    //10000,6,1,48,48,5
-    //10000,16,6,22,22,5
+    //std::cout << "M:" << M << std::endl;
+    //std::cout << "C:" << M << std::endl;
+    //std::cout << ":" << M << std::endl;
+    //std::cout << "M:" << M << std::endl;
+    //std::cout << C*M*K*K << std::endl;
     // Set the kernel dimensions
     dim3 gridDim(B, M, Z);
-
-    dim3 blockDim(CACHE_WIDTH, CACHE_WIDTH, 1);
+    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
+    //cudaMemcpyToSymbol(deviceKernel, &w, sizeof(float) * M * C * K * K);
 
     // Call the kernel
-    forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+     // if(C == 1) {
+     //     cudaMemcpyToSymbol(kernel1, w.dptr_, sizeof(float) * C * M * K * K);
+     //     forward_kernel_cons_kernel_1<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+     // }
+     // else {
+     //     cudaMemcpyToSymbol(kernel2, w.dptr_, sizeof(float) * C * M * K * K);
+     //     forward_kernel_cons_kernel_2<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+     // }
+
+    forward_kernel_origin<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+
+    
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
