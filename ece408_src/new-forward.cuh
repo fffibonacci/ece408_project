@@ -8,7 +8,8 @@ namespace mxnet
 {
 namespace op
 {
-#define TILE_WIDTH 16
+#define TILE_WIDTH 32
+#define BLOCK_WIDTH 16
 // this part is for shared memory convolution
 #define KERNEL_WIDTH   5
 //#define TILE_WIDTH     20
@@ -114,7 +115,7 @@ __global__ void forward_kernel_origin(float *y, const float *x, const float *k, 
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    const int W_grid = ceil(1.0*W_out/TILE_WIDTH);
+    const int W_grid = ceil(1.0*W_out/BLOCK_WIDTH);
    // const int H_grid = H_out/TILE_WIDTH;
    // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
    // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
@@ -127,9 +128,9 @@ __global__ void forward_kernel_origin(float *y, const float *x, const float *k, 
 #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
     int b = blockIdx.x;
     int m = blockIdx.y;
-    int h = (blockIdx.z / W_grid) * TILE_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
+    int h = (blockIdx.z / W_grid) * BLOCK_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
                                                               // so we need to multiply by TILE_WIDTH
-    int w = (blockIdx.z % W_grid) * TILE_WIDTH + threadIdx.x;
+    int w = (blockIdx.z % W_grid) * BLOCK_WIDTH + threadIdx.x;
     float acc = 0.;
     for(int c = 0; c < C; c++){
         for(int p = 0; p < K; p++){
@@ -147,7 +148,7 @@ __global__ void forward_kernel_origin(float *y, const float *x, const float *k, 
 #undef k4d
 }
 
-__global__ void forward_kernel_cons_kernel_1(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
+__global__ void forward_kernel_cons_kernel_1(float *__restrict__ y, const float *__restrict__ x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
 
     /*
@@ -159,7 +160,7 @@ __global__ void forward_kernel_cons_kernel_1(float *y, const float *x, const flo
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    const int W_grid = ceil(1.0*W_out/TILE_WIDTH);
+    const int W_grid = ceil(1.0*W_out/BLOCK_WIDTH);
    // const int H_grid = H_out/TILE_WIDTH;
    // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
    // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
@@ -172,20 +173,37 @@ __global__ void forward_kernel_cons_kernel_1(float *y, const float *x, const flo
 #define k4d(i3, i2, i1, i0) kernel1[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
     int b = blockIdx.x;
     int m = blockIdx.y;
-    int h = (blockIdx.z / W_grid) * TILE_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
+    int h = (blockIdx.z / W_grid) * BLOCK_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
                                                               // so we need to multiply by TILE_WIDTH
-    int w = (blockIdx.z % W_grid) * TILE_WIDTH + threadIdx.x;
-    float acc = 0.;
+    int w = (blockIdx.z % W_grid) * BLOCK_WIDTH + threadIdx.x;
+    float acc1, acc2= 0.;
     for(int c = 0; c < C; c++){
+        #pragma unroll 5
         for(int p = 0; p < K; p++){
+            #pragma unroll 5
             for(int q=0; q < K; q++){
                 if(h+p < H && w+q < W)
-                    acc += x4d(b,c,h+p,w+q) * k4d(m,c,p,q);
+                    acc1 += x4d(b,c,h+p,w+q) * k4d(m,c,p,q);
+                // if(h+p+1 < H && w+q < W)
+                //     acc2 += x4d(b,c,h+p+1,w+q) * k4d(m,c,p,q);
+                    // if( w+q+1 < W)
+                    //     acc3 += x4d(b,c,h+p,w+q+1) * k4d(m,c,p,q);
+                    // if(h+p+1 < H && w+q+1 < W)
+                    //     acc4 += x4d(b,c,h+p+1,w+q+1) * k4d(m,c,p,q);
             }
         }
     }
-    if(h<H_out && w<W_out)
-        y4d(b,m,h,w) = acc;
+    if(h<H_out && w<W_out) {
+        y4d(b,m,h,w) = acc1;
+        // if(h+1 < H_out)
+        //     y4d(b,m,h+1,w) = acc2;
+        // if(w+1 < W_out)
+        //     y4d(b,m,h,w+1) = acc3;
+        // if(h+1 < H_out && w+1 < W_out)
+        //     y4d(b,m,h+1,w+1) = acc4;
+
+    }
+
 
 #undef y4d
 #undef x4d
@@ -204,7 +222,7 @@ __global__ void forward_kernel_cons_kernel_2(float *y, const float *x, const flo
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    const int W_grid = ceil(1.0*W_out/TILE_WIDTH);
+    const int W_grid = ceil(1.0*W_out/BLOCK_WIDTH);
    // const int H_grid = H_out/TILE_WIDTH;
    // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
    // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
@@ -217,12 +235,13 @@ __global__ void forward_kernel_cons_kernel_2(float *y, const float *x, const flo
 #define k4d(i3, i2, i1, i0) kernel2[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
     int b = blockIdx.x;
     int m = blockIdx.y;
-    int h = (blockIdx.z / W_grid) * TILE_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
+    int h = (blockIdx.z / W_grid) * BLOCK_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
                                                               // so we need to multiply by TILE_WIDTH
-    int w = (blockIdx.z % W_grid) * TILE_WIDTH + threadIdx.x;
+    int w = (blockIdx.z % W_grid) * BLOCK_WIDTH + threadIdx.x;
     float acc = 0.;
     for(int c = 0; c < C; c++){
         for(int p = 0; p < K; p++){
+            //#pragma unroll(3)
             for(int q=0; q < K; q++){
                 if(h+p < H && w+q < W)
                     acc += x4d(b,c,h+p,w+q) * k4d(m,c,p,q);
@@ -259,7 +278,7 @@ __global__ void unroll(int C, int H, int W, int K, float *x, float *x_unroll)
         s = t % W_unroll;
         h_out = s / W_out;
         w_out = s % W_out;
-        w_unroll = h_out * W_out + w_out;
+        w_unroll = h_out * W_out + w_out; // s
         w_base = c * K * K;
         for(p = 0; p < K; p++){
             for(q = 0; q < K; q++) {
@@ -277,7 +296,7 @@ __global__ void unroll(int C, int H, int W, int K, float *x, float *x_unroll)
 //#define TILE_WIDTH 32
 
 // Compute C = A * B
-__global__ void matrixMultiplyShared(float *B, float *C,
+__global__ void matrixMultiplyShared(float *__restrict__ B, float *__restrict__ C,
                                      int numARows, int numAColumns,
                                      int numBRows, int numBColumns,
                                      int numCRows, int numCColumns, int CH, int H, int W) {
@@ -297,7 +316,8 @@ __global__ void matrixMultiplyShared(float *B, float *C,
   int Col = bx*TILE_WIDTH + tx;
 
   float Pvalue = 0.0;
-    for(int m = 0; m < (numAColumns-1)/TILE_WIDTH + 1; ++m){
+    #pragma unroll(8)
+    for(int m = 0; m < (numAColumns-1)/TILE_WIDTH + 1; m++){
 
       // if( Row<numARows&&(m * TILE_WIDTH+tx) < numAColumns)
       //   subTileA[ty][tx] = A[Row*numAColumns + m * TILE_WIDTH+tx];
@@ -318,6 +338,7 @@ __global__ void matrixMultiplyShared(float *B, float *C,
       __syncthreads();
 
     if((Row<numCRows) && (Col<numCColumns)){
+      #pragma unroll(32)
       for(int k = 0; k < TILE_WIDTH; ++k){
       //  Pvalue += subTileA[ty][k] * subTileB[k][tx];
             Pvalue += Mask[Row*numAColumns + m * TILE_WIDTH+k]* subTileB[k][tx];
@@ -405,31 +426,76 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     //std::cout << C << std::endl;
     //std::cout << K << std::endl;
     //std::cout << W << std::endl;
+    const int x_size = x.shape_[0] * x.shape_[1] * x.shape_[2] * x.shape_[3] / 2;
+    const int y_size = y.shape_[0] * y.shape_[1] * y.shape_[2] * y.shape_[3] / 2;
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    const int W_grid = ceil(W_out*1.0/TILE_WIDTH);
-    const int H_grid = ceil(H_out*1.0/TILE_WIDTH);
+    const int W_grid = W_out*1.0/BLOCK_WIDTH;
+    const int H_grid = H_out*1.0/(BLOCK_WIDTH);
     const int Z = H_grid * W_grid;
-    //std::cout << "M:" << M << std::endl;
+    dim3 gridDim(B, M, Z);
+    dim3 blockDim(BLOCK_WIDTH, BLOCK_WIDTH, 1);
+    // std::cout << x.shape_[0] << std::endl;
+    // std::cout << x.shape_[1] << std::endl;
+    // std::cout << x.shape_[2] << std::endl;
+    // std::cout << x.shape_[3] << std::endl;
+    // std::cout << y.shape_[0] << std::endl;
+    // std::cout << y.shape_[1] << std::endl;
+    // std::cout << y.shape_[2] << std::endl;
+    // std::cout << y.shape_[3] << std::endl;
     //std::cout << "C:" << M << std::endl;
     //std::cout << ":" << M << std::endl;
     //std::cout << "M:" << M << std::endl;
     //std::cout << C*M*K*K << std::endl;
     // Set the kernel dimensions
-    dim3 gridDim(B, M, Z);
-    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
     //cudaMemcpyToSymbol(deviceKernel, &w, sizeof(float) * M * C * K * K);
 
     // Launch Optimization 2: constant kernel matrix
     // Call the kernel
     if(C == 1) {
-        cudaMemcpyToSymbol(kernel1, w.dptr_, sizeof(float) * C * M * K * K);
-        forward_kernel_cons_kernel_1<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+        cudaStream_t stream1;//,stream2;
+        cudaStreamCreate(&stream1);
+        //cudaStreamCreate(&stream2);
+        forward_kernel_origin<<<gridDim,blockDim,0,stream1>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+        //forward_kernel_origin<<<gridDim,blockDim,0,stream2>>>(y.dptr_ + y_size,x.dptr_ + x_size, w.dptr_, B,M,C,H,W,K);
+        cudaStreamDestroy(stream1);
+        //cudaStreamDestroy(stream2);
+        //cudaMemcpyToSymbol(kernel1, w.dptr_, sizeof(float) * C * M * K * K);
+        //forward_kernel_cons_kernel_1<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
     }
     else {
-        cudaMemcpyToSymbol(kernel2, w.dptr_, sizeof(float) * C * M * K * K);
-        forward_kernel_cons_kernel_2<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+        //cudaMemcpyToSymbol(kernel2, w.dptr_, sizeof(float) * C * M * K * K);
+        //forward_kernel_cons_kernel_2<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+        int W_unroll = C * K * K;
+        int H_unroll = H_out * W_out;
+
+        // //float *X_unrolled;
+        // //cudaMalloc((void **) &X_unrolled, B * W_unroll * H_unroll * sizeof(float));
+
+        cudaMemcpyToSymbol(Mask, w.dptr_, K*K*C*M*sizeof(float));
+
+        dim3 mmGrid(B, ceil(1.0*H_unroll/TILE_WIDTH), ceil(1.0*M/TILE_WIDTH));
+        dim3 mmBlock(1, TILE_WIDTH, TILE_WIDTH);
+
+        // //int num_threads = C * H_out * W_out;
+        int num_blocks = ceil(1.0*(C * H_out * W_out) / (NUM_THREADS * 2));
+        dim3 unrollGrid(B, num_blocks, 1);
+        dim3 unrollBlock(1, NUM_THREADS, 1);
+
+
+        // //unroll<<<unrollGrid, unrollBlock>>>(C, H, W, K, x.dptr_, X_unrolled);
+        cudaStream_t stream1; // stream2;
+        cudaStreamCreate(&stream1);
+        //cudaStreamCreate(&stream2);
+        matrixMultiplyShared<<<mmGrid, mmBlock,0,stream1>>>(x.dptr_, y.dptr_, M, W_unroll, W_unroll, H_unroll, M, H_unroll, C, H, W);
+        //matrixMultiplyShared<<<mmGrid, mmBlock,0,stream2>>>(x.dptr_ + x_size, y.dptr_ + y_size, M, W_unroll, W_unroll, H_unroll, M, H_unroll, C, H, W);
+        //forward_kernel_origin<<<gridDim,blockDim,0,stream1>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+        //forward_kernel_origin<<<gridDim,blockDim,0,stream2>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+        cudaStreamDestroy(stream1);
+        //cudaStreamDestroy(stream2);
+        //
+
     }
 
     //forward_kernel_origin<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
@@ -448,25 +514,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
 
     // launch Optimization 3: unrolling + shared matrix multiply
-    // int W_unroll = C * K * K;
-    //     int H_unroll = H_out * W_out;
 
-    //     //float *X_unrolled;
-    //     //cudaMalloc((void **) &X_unrolled, B * W_unroll * H_unroll * sizeof(float));
-
-    //     cudaMemcpyToSymbol(Mask, w.dptr_, K*K*C*M*sizeof(float));
-
-    //     dim3 mmGrid(B, ceil(1.0*H_unroll/TILE_WIDTH), ceil(1.0*M/TILE_WIDTH));
-    // dim3 mmBlock(1, TILE_WIDTH, TILE_WIDTH);
-
-    //     //int num_threads = C * H_out * W_out;
-    //     int num_blocks = ceil(1.0*(C * H_out * W_out) / NUM_THREADS);
-    //     dim3 unrollGrid(B, num_blocks, 1);
-    //     dim3 unrollBlock(1, NUM_THREADS, 1);
-
-
-    //     //unroll<<<unrollGrid, unrollBlock>>>(C, H, W, K, x.dptr_, X_unrolled);
-    //     matrixMultiplyShared<<<mmGrid, mmBlock>>>(x.dptr_, y.dptr_, M, W_unroll, W_unroll, H_unroll, M, H_unroll, C, H, W);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
