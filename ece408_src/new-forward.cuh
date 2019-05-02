@@ -135,7 +135,7 @@ __global__ void matrixMultiplyShared(float *__restrict__ B, float *__restrict__ 
 }
 
 
-__global__ void forward_kernel_cons_kernel_1(float *__restrict__ y, const float *__restrict__ x, const int B, const int M, const int C, const int H, const int W, const int K)
+__global__ void forward_kernel_cons_kernel_1(float *__restrict__ y, const float *__restrict__ x)
 {
 
     /*
@@ -144,11 +144,13 @@ __global__ void forward_kernel_cons_kernel_1(float *__restrict__ y, const float 
     The goal here is to be correct AND fast.
     We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
     */
-		//
+        //
     // const int H_out = H - K + 1;
     // const int W_out = W - K + 1;
-    const int W_grid = ceil(1.0*44/BLOCK_WIDTH);
-		//prinf("%d, %d, %d ,%d\", H, W, M, C);
+    //const int W_grid = ceil(1.0*44/BLOCK_WIDTH);
+    const int num_grid = 44 * 44 / (BLOCK_WIDTH * BLOCK_WIDTH * 2);
+    float sub_input[5][4];
+        //prinf("%d, %d, %d ,%d\", H, W, M, C);
    // const int H_grid = H_out/TILE_WIDTH;
    // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
    // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
@@ -161,24 +163,47 @@ __global__ void forward_kernel_cons_kernel_1(float *__restrict__ y, const float 
 #define k4d(i3, i1, i0) Mask[(i3) * (25)  + (i1) * (5) + i0]
     int b = blockIdx.x;
     int m = blockIdx.y;
-    int h = (blockIdx.z / W_grid) * BLOCK_WIDTH + threadIdx.x/BLOCK_WIDTH; // we get the grid number of (blockIdx.z / W_grid) by this
+    int total1 = (blockIdx.z % num_grid ) *2* BLOCK_WIDTH * BLOCK_WIDTH + threadIdx.x * 2;
+    int h1 = total1 / 44;
+    int w1 = total1 % 44;
+    int total2 = (blockIdx.z % num_grid ) *2* BLOCK_WIDTH * BLOCK_WIDTH + threadIdx.x * 2 + 1;
+    int h2 = total2 / 44;
+    int w2 = total2 % 44;
+    //int h = (blockIdx.z / W_grid) * BLOCK_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
                                                               // so we need to multiply by TILE_WIDTH
-    int w = (blockIdx.z % W_grid) * BLOCK_WIDTH + threadIdx.x%BLOCK_WIDTH;
+    //int w = (blockIdx.z % W_grid) * BLOCK_WIDTH + threadIdx.x;
     float acc = 0.;
+    float elem;
     //for(int c = 0; c < C; c++){
-		if(h<44 && w<44){
-				#pragma unroll 5
-        for(int p = 0; p < K; p++){
+    if(h1<44 && w1<44){
+        #pragma unroll 5
+        for(int p = 0; p < 5; p++){
             #pragma unroll 5
-            for(int q=0; q < K; q++){
+            for(int q=0; q < 5; q++){
                 //if(h+p < H && w+q < W)
-                    acc += x4d(b,h+p,w+q) * k4d(m,p,q);
+                elem = x4d(b,h1+p,w1+q);
+                acc += elem * k4d(m,p,q);
+                if(q > 0)
+                    sub_input[p][q-1] = elem; //reuse 20 elements of input
             }
         }
-		}
-    //}
-    if(h<44 && w<44)
-        y4d(b,m,h,w) = acc;
+        y4d(b,m,h1,w1) = acc;
+    }
+     acc = 0.;
+     if(h2<44 && w2<44){
+        #pragma unroll 5
+        for(int p = 0; p < 5; p++){
+            #pragma unroll 5
+            for(int q=0; q < 5; q++){
+                if(q < 4)
+                    acc += sub_input[p][q] * k4d(m,p,q);
+                else
+                    acc += x4d(b,h2+p,w2+q) * k4d(m,p,q);
+            }
+        }
+         y4d(b,m,h2,w2) = acc;
+     }
+
 
 #undef y4d
 #undef x4d
@@ -259,7 +284,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int W_out = W - K + 1;
     const int W_grid = ceil(W_out*1.0/BLOCK_WIDTH);
     const int H_grid = ceil(H_out*1.0/BLOCK_WIDTH);
-    const int Z = H_grid * W_grid;
+    const int Z = H_grid * W_grid / 2;
     dim3 gridDim(B, M, Z);
     dim3 blockDim(BLOCK_WIDTH*BLOCK_WIDTH, 1, 1);
 
@@ -269,7 +294,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     if(C == 1) {
 
         cudaMemcpyToSymbol(Mask, w.dptr_, sizeof(float) * C * M * K * K);
-        forward_kernel_cons_kernel_1<<<gridDim, blockDim>>>(y.dptr_,x.dptr_, B,M,C,H,W,K);
+        forward_kernel_cons_kernel_1<<<gridDim, blockDim>>>(y.dptr_,x.dptr_);
     }
     else {
         //cudaMemcpyToSymbol(kernel2, w.dptr_, sizeof(float) * C * M * K * K);
