@@ -50,7 +50,8 @@ __global__ void unroll(int C, int H, int W, int K, float *x, float *x_unroll)
 }
 
 
-#define TILE_WIDTH 32
+#define TILE_WIDTH 64
+#define TILE_HEIGHT 16
 
 // Compute C = A * B
 __global__ void matrixMultiplyShared(float *__restrict__ B, float *__restrict__ C,
@@ -60,50 +61,64 @@ __global__ void matrixMultiplyShared(float *__restrict__ B, float *__restrict__ 
   //@@ Insert code to implement matrix multiplication here
   //@@ You have to use shared memory for this MP
   //__shared__ float subTileA[TILE_WIDTH][TILE_WIDTH];
-  __shared__ float subTileB[TILE_WIDTH][TILE_WIDTH];
+  __shared__ float subTileB[TILE_HEIGHT][TILE_WIDTH];
 	int batch = blockIdx.x;
   int bx = blockIdx.y;
   int by = blockIdx.z;
-  int tx = threadIdx.y;
-  int ty = threadIdx.z;
+  int tx = threadIdx.x%TILE_WIDTH;
+  int ty = threadIdx.x/TILE_WIDTH;
 
 	//int W_out = W - 4;
 
 	//printf("%d, %d, %d, %d, %d, %d, %d, %d, %d \n", numARows, numAColumns, numBRows, numBColumns, numCRows, numCColumns, CH, H, W);
 
-  int Row = by*TILE_WIDTH + ty;
+  int Row = by*TILE_HEIGHT + ty;
   int Col = bx*TILE_WIDTH + tx;
 	int ybase = Col / 18;//W_out;
 	int xbase = Col % 18;//W_out;
   float Pvalue = 0.0;
+	float Pvalue1 = 0.0;
 
-    for(int m = 0; m < 5; ++m){ //(numAColumns-1)/TILE_WIDTH + 1
+    for(int m = 0; m < 10; ++m){ //(numAColumns-1)/TILE_WIDTH + 1
 
       // if( Row<numARows&&(m * TILE_WIDTH+tx) < numAColumns)
       //   subTileA[ty][tx] = A[Row*numAColumns + m * TILE_WIDTH+tx];
       // else
       //   subTileA[ty][tx] = 0.0;
 
-			int channel = (m*TILE_WIDTH+ty)/25;
-			int linidx = (m*TILE_WIDTH+ty)%25;
+			int channel = (m*TILE_HEIGHT+ty)/25;
+			int linidx = (m*TILE_HEIGHT+ty)%25;
 			int in_x = linidx % 5;
 			int in_y = linidx / 5;
 
-      if((m*TILE_WIDTH+ty)<150&&Col<324) //brow, bcol
+      if((m*TILE_HEIGHT+ty)<150&&Col<324) //brow, bcol
         subTileB[ty][tx] = B[batch * (2904)+channel*(484)+(ybase+in_y)*22 + xbase+in_x];//B[batch * (numBRows*numBColumns)+(m*TILE_WIDTH+ty)*numBColumns + Col];
       else
         subTileB[ty][tx] = 0.0;
 
+			// channel = (m*TILE_WIDTH+ty+1)/25;
+			// linidx = (m*TILE_WIDTH+ty+1)%25;
+			// in_x = linidx % 5;
+			// in_y = linidx / 5;
+			// if((m*TILE_WIDTH+ty+1)<150&&Col<324) //brow, bcol
+      //   subTileB[ty+1][tx] = B[batch * (2904)+channel*(484)+(ybase+in_y)*22 + xbase+in_x];//B[batch * (numBRows*numBColumns)+(m*TILE_WIDTH+ty)*numBColumns + Col];
+      // else
+      //   subTileB[ty+1][tx] = 0.0;
+
       __syncthreads();
 
-    if((Row<16) && (Col<324)){ //crowm ccol
-			#pragma unroll 8
-      for(int k = 0; k < TILE_WIDTH; k+=4){
+    if((Row<16) && (Col<324)){ //crows ccol
+			#pragma unroll 16
+      for(int k = 0; k < TILE_HEIGHT; ++k){
+				//C[(batch*(5184)+Row*324+Col)*150+m*32+k]=Mask[Row*150 + m * TILE_WIDTH+k]* subTileB[k][tx];
         //Pvalue += subTileA[ty][k] * subTileB[k][tx];
-			 	Pvalue += Mask[Row*150 + m * TILE_WIDTH+k]* subTileB[k][tx];
-				Pvalue += Mask[Row*150 + m * TILE_WIDTH+k+1]* subTileB[k+1][tx];
-				Pvalue += Mask[Row*150 + m * TILE_WIDTH+k+2]* subTileB[k+2][tx];
-				Pvalue += Mask[Row*150 + m * TILE_WIDTH+k+3]* subTileB[k+3][tx];
+				 // float reg_b = subTileB[k][tx];
+			 	 Pvalue += Mask[Row*150 + m * TILE_HEIGHT+k]* subTileB[k][tx];
+				 // if(Row<15)
+ 			 	 // Pvalue1 += Mask[(Row+1)*150 + m * TILE_WIDTH+k]* reg_b;
+				// Pvalue += Mask[Row*150 + m * TILE_WIDTH+k+1]* subTileB[k+1][tx];
+				// Pvalue += Mask[Row*150 + m * TILE_WIDTH+k+2]* subTileB[k+2][tx];
+				// Pvalue += Mask[Row*150 + m * TILE_WIDTH+k+3]* subTileB[k+3][tx];
 
       }
     }
@@ -112,8 +127,11 @@ __global__ void matrixMultiplyShared(float *__restrict__ B, float *__restrict__ 
 
   if((Row<16) && (Col<324)){
     C[batch*(5184)+Row*324+Col] = Pvalue;
-
   }
+	// if((Row<15) && (Col<324)){
+  //   C[batch*(5184)+(Row+1)*324+Col] = Pvalue1;
+	//
+  // }
 }
 
 
@@ -143,9 +161,9 @@ __global__ void forward_kernel_cons_kernel_1(float *__restrict__ y, const float 
 #define k4d(i3, i1, i0) Mask[(i3) * (25)  + (i1) * (5) + i0]
     int b = blockIdx.x;
     int m = blockIdx.y;
-    int h = (blockIdx.z / W_grid) * BLOCK_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
+    int h = (blockIdx.z / W_grid) * BLOCK_WIDTH + threadIdx.x/BLOCK_WIDTH; // we get the grid number of (blockIdx.z / W_grid) by this
                                                               // so we need to multiply by TILE_WIDTH
-    int w = (blockIdx.z % W_grid) * BLOCK_WIDTH + threadIdx.x;
+    int w = (blockIdx.z % W_grid) * BLOCK_WIDTH + threadIdx.x%BLOCK_WIDTH;
     float acc = 0.;
     //for(int c = 0; c < C; c++){
 		if(h<44 && w<44){
@@ -157,7 +175,7 @@ __global__ void forward_kernel_cons_kernel_1(float *__restrict__ y, const float 
                     acc += x4d(b,h+p,w+q) * k4d(m,p,q);
             }
         }
-			}
+		}
     //}
     if(h<44 && w<44)
         y4d(b,m,h,w) = acc;
@@ -243,7 +261,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H_grid = ceil(H_out*1.0/BLOCK_WIDTH);
     const int Z = H_grid * W_grid;
     dim3 gridDim(B, M, Z);
-    dim3 blockDim(BLOCK_WIDTH, BLOCK_WIDTH, 1);
+    dim3 blockDim(BLOCK_WIDTH*BLOCK_WIDTH, 1, 1);
 
 
     // Launch Optimization 2: constant kernel matrix
@@ -259,13 +277,13 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
         //int W_unroll = C * K * K;
         int H_unroll = H_out * W_out;
 
-        // //float *X_unrolled;
-        // //cudaMalloc((void **) &X_unrolled, B * W_unroll * H_unroll * sizeof(float));
+        // float *pval_arr;
+        // cudaMalloc((void **) &pval_arr, B*M*150 *H_out*W_out* sizeof(float));
 
         cudaMemcpyToSymbol(Mask, w.dptr_, K*K*C*M*sizeof(float));
 
-        dim3 mmGrid(B, ceil(1.0*H_unroll/TILE_WIDTH), ceil(1.0*M/TILE_WIDTH));
-        dim3 mmBlock(1, TILE_WIDTH, TILE_WIDTH);
+        dim3 mmGrid(B, ceil(1.0*H_unroll/TILE_WIDTH), 1);
+        dim3 mmBlock(TILE_WIDTH*TILE_HEIGHT, 1 ,1);
 
         // //int num_threads = C * H_out * W_out;
         // int num_blocks = ceil(1.0*(C * H_out * W_out) / NUM_THREADS);
