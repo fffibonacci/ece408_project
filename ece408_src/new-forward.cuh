@@ -160,7 +160,8 @@ __global__ void forward_kernel_cons_kernel_1(float *__restrict__ y, const float 
     // const int H_out = H - K + 1;
     // const int W_out = W - K + 1;
     //const int W_grid = ceil(1.0*44/BLOCK_WIDTH);
-    const int num_grid = 44 * 44 / (BLOCK_WIDTH * BLOCK_WIDTH);
+    const int num_grid = 44 * 44 / (BLOCK_WIDTH * BLOCK_WIDTH * 2);
+    float sub_input[5][4];
         //prinf("%d, %d, %d ,%d\", H, W, M, C);
    // const int H_grid = H_out/TILE_WIDTH;
    // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
@@ -174,26 +175,46 @@ __global__ void forward_kernel_cons_kernel_1(float *__restrict__ y, const float 
 #define k4d(i3, i1, i0) Mask[(i3) * (25)  + (i1) * (5) + i0]
     int b = blockIdx.x;
     int m = blockIdx.y;
-    int total = (blockIdx.z % num_grid) * BLOCK_WIDTH * BLOCK_WIDTH + threadIdx.x;
-    int h = total / 44;
-    int w = total % 44;
+    int total1 = (blockIdx.z % num_grid ) *2* BLOCK_WIDTH * BLOCK_WIDTH + threadIdx.x * 2;
+    int h1 = total1 / 44;
+    int w1 = total1 % 44;
+    int total2 = (blockIdx.z % num_grid ) *2* BLOCK_WIDTH * BLOCK_WIDTH + threadIdx.x * 2 + 1;
+    int h2 = total2 / 44;
+    int w2 = total2 % 44;
     //int h = (blockIdx.z / W_grid) * BLOCK_WIDTH + threadIdx.y; // we get the grid number of (blockIdx.z / W_grid) by this
                                                               // so we need to multiply by TILE_WIDTH
     //int w = (blockIdx.z % W_grid) * BLOCK_WIDTH + threadIdx.x;
     float acc = 0.;
+    float elem;
     //for(int c = 0; c < C; c++){
-    if(h<44 && w<44){
+    if(h1<44 && w1<44){
         #pragma unroll 5
         for(int p = 0; p < 5; p++){
             #pragma unroll 5
             for(int q=0; q < 5; q++){
                 //if(h+p < H && w+q < W)
-                acc += x4d(b,h+p,w+q) * k4d(m,p,q);
+                elem = x4d(b,h1+p,w1+q);
+                acc += elem * k4d(m,p,q);
+                if(q > 0)
+                    sub_input[p][q-1] = elem; //reuse 20 elements of input
             }
         }
-        y4d(b,m,h,w) = acc;
+        y4d(b,m,h1,w1) = acc;
     }
-    //}
+     acc = 0.;
+     if(h2<44 && w2<44){
+        #pragma unroll 5
+        for(int p = 0; p < 5; p++){
+            #pragma unroll 5
+            for(int q=0; q < 5; q++){        
+                if(q < 4)
+                    acc += sub_input[p][q] * k4d(m,p,q);
+                else
+                    acc += x4d(b,h2+p,w2+q) * k4d(m,p,q);
+            }
+        }
+         y4d(b,m,h2,w2) = acc;
+     }
         
 
 #undef y4d
@@ -430,7 +451,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     //std::cout << H_out << std::endl;
     const int W_grid = ceil(44 * 1.0/(BLOCK_WIDTH));
     const int H_grid = ceil(44 *1.0/BLOCK_WIDTH);
-    const int Z = H_grid * W_grid;
+    const int Z = H_grid * W_grid / 2;
     //std::cout << "M:" << M << std::endl;
     //std::cout << "C:" << M << std::endl;
     //std::cout << ":" << M << std::endl;
@@ -482,7 +503,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
         cudaMemcpyToSymbol(Mask, w.dptr_, K*K*C*M*sizeof(float));
 
         dim3 mmGrid(B, ceil(1.0*H_unroll/TILE_WIDTH), ceil(1.0*M/TILE_WIDTH));
-        dim3 mmBlock(1, TILE_WIDTH, TILE_WIDTH);
+        dim3 mmBlock(1,TILE_WIDTH, TILE_WIDTH);
 
     //     //int num_threads = C * H_out * W_out;
          // int num_blocks = ceil(1.0*(C * H_out * W_out) / NUM_THREADS);
